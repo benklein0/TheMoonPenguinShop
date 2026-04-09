@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "fontconfig"]
+nixPkgs = ["nodejs_22", "ffmpeg", "fontconfig"]

@@ -18,14 +18,14 @@ Shop URL: ${listing.listingUrl}
 
 Requirements:
 - 2-4 sentences max, warm and enthusiastic tone
-- Mention the handmade/artisan quality
-- Include a subtle call to action (link in bio, shop now, etc.)
+- ALWAYS emphasize that the item is handmade — use phrases like "handcrafted by hand", "made by hand", "one-of-a-kind handmade piece", "lovingly handcrafted" etc. This must be prominent, not an afterthought
+- Include the shop URL (${listing.listingUrl}) on its own line after the caption text, before the hashtags
 - End with 15-20 relevant hashtags on a new line
 - Hashtags should include a mix of: #themoonpenguinshop, niche product tags, aesthetic tags (#cottagecore, #darkacademia, #witchyvibes, #resinart, #handmadejewelry etc.), and shopping tags (#etsyshop, #handmade, #smallbusiness)
 - Do NOT use emojis in the caption text, only in hashtags if appropriate
-- Keep it under 300 characters for the caption (before hashtags)
+- Keep the caption text itself under 300 characters (not counting the URL or hashtags)
 
-Return ONLY the caption text + hashtags, nothing else.`;
+Return ONLY the caption text + URL + hashtags, nothing else.`;
 
   const message = await client.messages.create({
     model: 'claude-opus-4-5',

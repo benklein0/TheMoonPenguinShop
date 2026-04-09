@@ -29,109 +29,81 @@ async function downloadImage(url, destPath) {
   fs.writeFileSync(destPath, response.data);
 }
 
-function escapeXml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+// Download a font file for use with ffmpeg drawtext
+async function ensureFont() {
+  const fontPath = path.join(OUTPUT_DIR, 'font.ttf');
+  if (!fs.existsSync(fontPath)) {
+    console.log('📥 Downloading font...');
+    const res = await axios.get(
+      'https://fonts.gstatic.com/s/playfairdisplay/v37/nuFvD-vYSZviVYUb_rj3ij__anPXJzDwcbmjWBN2PKdFvUDQ.ttf',
+      { responseType: 'arraybuffer', timeout: 15000 }
+    );
+    fs.writeFileSync(fontPath, Buffer.from(res.data));
+    console.log('✅ Font downloaded');
+  }
+  return fontPath;
 }
 
-// Wrap long title into multiple lines
-function wrapTitle(title, maxCharsPerLine = 28) {
+// Wrap title into lines for ffmpeg drawtext
+function wrapTitle(title, maxChars = 26) {
   const words = title.split(' ');
   const lines = [];
   let current = '';
-
   for (const word of words) {
-    if ((current + ' ' + word).trim().length <= maxCharsPerLine) {
+    if ((current + ' ' + word).trim().length <= maxChars) {
       current = (current + ' ' + word).trim();
     } else {
       if (current) lines.push(current);
       current = word;
+      if (lines.length >= 2) break;
     }
-    if (lines.length >= 3) break; // max 3 lines
   }
   if (current && lines.length < 3) lines.push(current);
-
-  return lines;
+  return lines.slice(0, 3);
 }
 
-async function composeFrame(imagePath, listing) {
+// Escape text for ffmpeg drawtext
+function ffmpegEscape(str) {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
+async function composeBgFrame(imagePath) {
   const framePath = path.join(OUTPUT_DIR, 'frame.png');
   const imageHeight = 1350;
-  const resizedImagePath = path.join(OUTPUT_DIR, 'resized.png');
+  const resizedPath = path.join(OUTPUT_DIR, 'resized.png');
 
   await sharp(imagePath)
     .resize(VIDEO_WIDTH, imageHeight, { fit: 'cover', position: 'centre' })
-    .toFile(resizedImagePath);
+    .toFile(resizedPath);
 
-  const titleLines = wrapTitle(listing.title, 26);
-  const price = listing.price || '';
-  const lineHeight = 68;
-  const titleStartY = VIDEO_HEIGHT - 340 - (titleLines.length - 1) * lineHeight;
-
-  const titleSvgLines = titleLines.map((line, i) =>
-    `<text x="${VIDEO_WIDTH / 2}" y="${titleStartY + i * lineHeight}"
-      font-family="Georgia, serif" font-size="58" fill="white"
-      text-anchor="middle" font-weight="bold">${escapeXml(line)}</text>`
-  ).join('\n');
-
+  // Create base canvas with image + gradients (no text — text added by ffmpeg)
   const svg = `
 <svg width="${VIDEO_WIDTH}" height="${VIDEO_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bottomGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" style="stop-color:black;stop-opacity:0"/>
-      <stop offset="100%" style="stop-color:black;stop-opacity:0.88"/>
-    </linearGradient>
     <linearGradient id="topGrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" style="stop-color:black;stop-opacity:0.55"/>
       <stop offset="100%" style="stop-color:black;stop-opacity:0"/>
     </linearGradient>
+    <linearGradient id="bottomGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" style="stop-color:black;stop-opacity:0"/>
+      <stop offset="100%" style="stop-color:black;stop-opacity:0.88"/>
+    </linearGradient>
   </defs>
-
-  <!-- Top gradient -->
   <rect x="0" y="0" width="${VIDEO_WIDTH}" height="200" fill="url(#topGrad)"/>
-
-  <!-- Bottom gradient -->
   <rect x="0" y="${VIDEO_HEIGHT - 650}" width="${VIDEO_WIDTH}" height="650" fill="url(#bottomGrad)"/>
-
-  <!-- Shop name at top -->
-  <text x="${VIDEO_WIDTH / 2}" y="115"
-    font-family="Georgia, serif" font-size="46" fill="white"
-    text-anchor="middle" letter-spacing="5" opacity="0.95">@themoonpenguinshop</text>
-
-  <!-- Product title (wrapped) -->
-  ${titleSvgLines}
-
-  <!-- Price pill -->
-  ${price ? `
-  <rect x="${VIDEO_WIDTH / 2 - 110}" y="${VIDEO_HEIGHT - 245}" width="220" height="65" rx="32" fill="white" opacity="0.92"/>
-  <text x="${VIDEO_WIDTH / 2}" y="${VIDEO_HEIGHT - 200}"
-    font-family="Georgia, serif" font-size="40" fill="#1a1a1a"
-    text-anchor="middle" font-weight="bold">${escapeXml(price)}</text>
-  ` : ''}
-
-  <!-- CTA -->
-  <text x="${VIDEO_WIDTH / 2}" y="${VIDEO_HEIGHT - 105}"
-    font-family="Georgia, serif" font-size="36" fill="white"
-    text-anchor="middle" opacity="0.8" letter-spacing="2">Shop via link in bio</text>
 </svg>`;
 
-  const svgBuffer = Buffer.from(svg);
-
   await sharp({
-    create: {
-      width: VIDEO_WIDTH,
-      height: VIDEO_HEIGHT,
-      channels: 4,
-      background: { r: 245, g: 240, b: 235, alpha: 1 }
-    }
+    create: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT, channels: 4, background: { r: 245, g: 240, b: 235, alpha: 1 } }
   })
     .composite([
-      { input: resizedImagePath, top: 0, left: 0 },
-      { input: svgBuffer, top: 0, left: 0 }
+      { input: resizedPath, top: 0, left: 0 },
+      { input: Buffer.from(svg), top: 0, left: 0 }
     ])
     .png()
     .toFile(framePath);
@@ -146,9 +118,39 @@ async function createReel(listing) {
   const rawImagePath = path.join(OUTPUT_DIR, 'product_raw.jpg');
   await downloadImage(listing.imageUrl, rawImagePath);
 
-  const framePath = await composeFrame(rawImagePath, listing);
+  const framePath = await composeBgFrame(rawImagePath);
+  const fontPath = await ensureFont();
   const musicPath = getRandomTrack();
   const outputPath = path.join(OUTPUT_DIR, `reel_${Date.now()}.mp4`);
+
+  const titleLines = wrapTitle(listing.title);
+  const price = listing.price || '';
+
+  // Build ffmpeg drawtext filters
+  const filters = [];
+  const lineHeight = 75;
+  const titleBaseY = VIDEO_HEIGHT - 380 - (titleLines.length - 1) * lineHeight;
+  const font = ffmpegEscape(fontPath);
+
+  // Shop name at top
+  filters.push(`drawtext=fontfile='${font}':text='@themoonpenguinshop':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=95`);
+
+  // Title lines
+  titleLines.forEach((line, i) => {
+    const y = titleBaseY + i * lineHeight;
+    filters.push(`drawtext=fontfile='${font}':text='${ffmpegEscape(line)}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=${y}`);
+  });
+
+  // Price text
+  if (price) {
+    const priceY = VIDEO_HEIGHT - 230;
+    filters.push(`drawtext=fontfile='${font}':text='${ffmpegEscape(price)}':fontcolor=white:fontsize=44:x=(w-text_w)/2:y=${priceY}`);
+  }
+
+  // CTA at bottom
+  filters.push(`drawtext=fontfile='${font}':text='Shop via link in bio':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=${VIDEO_HEIGHT - 105}`);
+
+  const filterString = filters.join(',');
 
   await new Promise((resolve, reject) => {
     ffmpeg()
@@ -156,6 +158,7 @@ async function createReel(listing) {
       .inputOptions([`-loop 1`, `-t ${VIDEO_DURATION}`])
       .input(musicPath)
       .inputOptions([`-t ${VIDEO_DURATION}`])
+      .videoFilters(filterString)
       .outputOptions([
         '-c:v libx264',
         '-tune stillimage',
@@ -163,13 +166,15 @@ async function createReel(listing) {
         '-b:a 192k',
         `-af volume=${MUSIC_VOLUME}`,
         '-pix_fmt yuv420p',
-        `-vf scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}`,
         '-shortest',
         '-movflags +faststart'
       ])
       .output(outputPath)
       .on('end', resolve)
-      .on('error', reject)
+      .on('error', (err) => {
+        console.error('ffmpeg error:', err.message);
+        reject(err);
+      })
       .run();
   });
 

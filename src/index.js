@@ -15,12 +15,18 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-// 6am, 8am, 6pm, 8pm EST (UTC-4 during daylight saving)
+// Weekday: 6am, 8am, 6pm, 8pm EST (Mon-Fri)
+// Weekend: 9am, 12pm, 3pm, 5pm EST (Sat-Sun)
+// All times in UTC (EST = UTC-4 during daylight saving)
 const POST_TIMES = [
-  '0 10 * * *',  // 6:00 AM EST
-  '0 12 * * *',  // 8:00 AM EST
-  '0 22 * * *',  // 6:00 PM EST
-  '0 0 * * *',   // 8:00 PM EST
+  { cron: '0 10 * * 1-5', label: '6:00 AM EST (Weekday)' },
+  { cron: '0 12 * * 1-5', label: '8:00 AM EST (Weekday)' },
+  { cron: '0 22 * * 1-5', label: '6:00 PM EST (Weekday)' },
+  { cron: '0 0 * * 2-6',  label: '8:00 PM EST (Weekday)' },
+  { cron: '0 13 * * 0,6', label: '9:00 AM EST (Weekend)' },
+  { cron: '0 16 * * 0,6', label: '12:00 PM EST (Weekend)' },
+  { cron: '0 19 * * 0,6', label: '3:00 PM EST (Weekend)' },
+  { cron: '0 21 * * 0,6', label: '5:00 PM EST (Weekend)' },
 ];
 
 async function runPipeline() {
@@ -72,17 +78,17 @@ async function runPipeline() {
   }
 }
 
-POST_TIMES.forEach((cronTime, i) => {
-  const labels = ['6:00 AM', '8:00 AM', '6:00 PM', '8:00 PM'];
+POST_TIMES.forEach(({ cron: cronTime, label }) => {
   cron.schedule(cronTime, () => {
-    console.log(`\n⏰ Scheduled trigger: ${labels[i]} EST`);
+    console.log(`\n⏰ Scheduled trigger: ${label}`);
     runPipeline();
   }, { timezone: 'UTC' });
-  console.log(`📅 Scheduled post at ${labels[i]} EST (${cronTime} UTC)`);
+  console.log(`📅 Scheduled: ${label} (${cronTime})`);
 });
 
 console.log('\n🐧 MoonPenguinPoster is running.');
-console.log('   Posts scheduled for: 6:00 AM, 8:00 AM, 6:00 PM, 8:00 PM EST\n');
+console.log('   Weekdays: 6am, 8am, 6pm, 8pm EST');
+console.log('   Weekends: 9am, 12pm, 3pm, 5pm EST\n');
 
 if (process.env.RUN_NOW === 'true') {
   console.log('🚀 RUN_NOW=true detected, running pipeline immediately...');

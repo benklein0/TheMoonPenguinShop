@@ -5,6 +5,7 @@ const { getNextListing, markAsPosted } = require('./rss');
 const { generateCaption } = require('./caption');
 const { createReel, cleanup } = require('./video');
 const { uploadReel } = require('./instagram');
+const { createPin } = require('./pinterest');
 
 const REQUIRED_ENV = ['IG_ACCESS_TOKEN', 'IG_USER_ID', 'ANTHROPIC_API_KEY', 'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
 for (const key of REQUIRED_ENV) {
@@ -47,6 +48,15 @@ async function runPipeline() {
 
     videoPath = await createReel(listing);
     await uploadReel(videoPath, caption);
+
+    // Post to Pinterest if configured
+    if (process.env.PINTEREST_ACCESS_TOKEN && process.env.PINTEREST_BOARD_ID) {
+      try {
+        await createPin(listing, caption);
+      } catch (pinErr) {
+        console.warn('⚠️  Pinterest post failed (non-fatal):', pinErr.message);
+      }
+    }
 
     // Mark as posted only after successful publish
     markAsPosted(listing.id);

@@ -4,6 +4,7 @@ const { getNextListing, markAsPosted } = require('./rss');
 const { generateCaption } = require('./caption');
 const { createReel, cleanup } = require('./video');
 const { uploadReel } = require('./instagram');
+const { createPin } = require('./pinterest');
 
 async function test() {
   console.log('🧪 MoonPenguinPoster — Manual Test Run\n');
@@ -51,8 +52,14 @@ async function test() {
     if (!skipPost) {
       console.log('Step 4: Uploading to Instagram...');
       await uploadReel(videoPath, caption);
+
+      if (process.env.PINTEREST_ACCESS_TOKEN && process.env.PINTEREST_BOARD_ID) {
+        console.log('Step 5: Posting to Pinterest...');
+        await createPin(listing, caption);
+      }
+
       markAsPosted(listing.id);
-      console.log('\n✅ Test complete — Reel posted successfully!');
+      console.log('\n✅ Test complete — posted to Instagram and Pinterest!');
     } else {
       console.log('Step 4: Skipped (SKIP_POST=true)');
       console.log(`\n✅ Test complete — video saved at ${videoPath}`);

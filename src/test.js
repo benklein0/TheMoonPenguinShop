@@ -2,7 +2,8 @@
 require('dotenv').config();
 const { getNextListing, markAsPosted } = require('./rss');
 const { generateCaption } = require('./caption');
-const { createReel, cleanup } = require('./video');
+const { generateVoiceoverScript, generateVoiceover } = require('./voiceover');
+const { createReel, createVoiceoverReel, cleanup } = require('./video');
 const { uploadReel } = require('./instagram');
 const { createPin } = require('./pinterest');
 
@@ -15,6 +16,10 @@ async function test() {
     process.exit(1);
   }
 
+  // Set REEL_TYPE=voiceover to test voiceover mode, otherwise defaults to standard
+  const reelType = process.env.REEL_TYPE || 'standard';
+  console.log(`🎬 Testing reel type: ${reelType}\n`);
+
   let videoPath = null;
 
   try {
@@ -22,8 +27,7 @@ async function test() {
     const listing = await getNextListing();
 
     if (!listing) {
-      console.log('⚠️  No unposted listings found in RSS feed.');
-      console.log('   Delete data/listings.json to reset the queue.');
+      console.log('⚠️  No unposted listings found. Delete data/listings.json to reset.');
       return;
     }
 
@@ -45,7 +49,16 @@ async function test() {
     console.log('\n');
 
     console.log('Step 3: Creating Reel video...');
-    videoPath = await createReel(listing);
+    if (reelType === 'voiceover') {
+      console.log('   Generating voiceover script...');
+      const script = await generateVoiceoverScript(listing);
+      console.log(`   Script: "${script.substring(0, 100)}..."`);
+      console.log('   Generating audio with ElevenLabs...');
+      const voiceoverPath = await generateVoiceover(script);
+      videoPath = await createVoiceoverReel(listing, voiceoverPath);
+    } else {
+      videoPath = await createReel(listing);
+    }
     console.log(`   Video: ${videoPath}\n`);
 
     const skipPost = process.env.SKIP_POST === 'true';
@@ -59,7 +72,7 @@ async function test() {
       }
 
       markAsPosted(listing.id);
-      console.log('\n✅ Test complete — posted to Instagram and Pinterest!');
+      console.log('\n✅ Test complete — posted successfully!');
     } else {
       console.log('Step 4: Skipped (SKIP_POST=true)');
       console.log(`\n✅ Test complete — video saved at ${videoPath}`);

@@ -3,9 +3,11 @@ require('dotenv').config();
 const cron = require('node-cron');
 const { getNextListing, markAsPosted } = require('./rss');
 const { generateCaption } = require('./caption');
-const { createReel, cleanup } = require('./video');
+const { generateVoiceoverScript, generateVoiceover } = require('./voiceover');
+const { createReel, createVoiceoverReel, cleanup } = require('./video');
 const { uploadReel } = require('./instagram');
 const { createPin } = require('./pinterest');
+const fs = require('fs');
 
 const REQUIRED_ENV = ['IG_ACCESS_TOKEN', 'IG_USER_ID', 'ANTHROPIC_API_KEY', 'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
 for (const key of REQUIRED_ENV) {
@@ -15,9 +17,25 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
+// Track which reel type to use next (alternates each post)
+const REEL_TYPE_FILE = './data/reel_type.json';
+
+function getNextReelType() {
+  try {
+    if (!fs.existsSync('./data')) fs.mkdirSync('./data', { recursive: true });
+    if (!fs.existsSync(REEL_TYPE_FILE)) return 'standard';
+    const data = JSON.parse(fs.readFileSync(REEL_TYPE_FILE, 'utf8'));
+    return data.next || 'standard';
+  } catch { return 'standard'; }
+}
+
+function setNextReelType(current) {
+  const next = current === 'standard' ? 'voiceover' : 'standard';
+  fs.writeFileSync(REEL_TYPE_FILE, JSON.stringify({ next }));
+}
+
 // Weekday: 6am, 8am, 6pm, 8pm EST (Mon-Fri)
 // Weekend: 9am, 12pm, 3pm, 5pm EST (Sat-Sun)
-// All times in UTC (EST = UTC-4 during daylight saving)
 const POST_TIMES = [
   { cron: '0 10 * * 1-5', label: '6:00 AM EST (Weekday)' },
   { cron: '0 12 * * 1-5', label: '8:00 AM EST (Weekday)' },
@@ -35,6 +53,8 @@ async function runPipeline() {
 
   let listing = null;
   let videoPath = null;
+  const reelType = getNextReelType();
+  console.log(`🎬 Reel type: ${reelType}`);
 
   try {
     listing = await getNextListing();
@@ -45,14 +65,23 @@ async function runPipeline() {
 
     if (!listing.imageUrl) {
       console.warn(`⚠️  No image found for: ${listing.title} — skipping`);
-      markAsPosted(listing.id); // skip it so we don't retry forever
+      markAsPosted(listing.id);
       return;
     }
 
     const caption = await generateCaption(listing);
     console.log('\n📝 Caption preview:\n', caption.substring(0, 150) + '...\n');
 
-    videoPath = await createReel(listing);
+    if (reelType === 'voiceover' && process.env.ELEVENLABS_API_KEY) {
+      // Voiceover ad reel
+      const script = await generateVoiceoverScript(listing);
+      const voiceoverPath = await generateVoiceover(script);
+      videoPath = await createVoiceoverReel(listing, voiceoverPath);
+    } else {
+      // Standard text overlay reel
+      videoPath = await createReel(listing);
+    }
+
     await uploadReel(videoPath, caption);
 
     // Post to Pinterest if configured
@@ -64,9 +93,9 @@ async function runPipeline() {
       }
     }
 
-    // Mark as posted only after successful publish
     markAsPosted(listing.id);
-    console.log(`\n🎉 Successfully posted: ${listing.title}`);
+    setNextReelType(reelType);
+    console.log(`\n🎉 Successfully posted: ${listing.title} (${reelType} reel)`);
 
   } catch (err) {
     console.error('\n❌ Pipeline error:', err.message);

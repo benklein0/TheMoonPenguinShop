@@ -83,18 +83,23 @@ async function createMediaContainer({ mediaType, videoUrl, caption }) {
 
 async function waitForContainer(containerId) {
   let status = 'IN_PROGRESS';
+  let statusDetail = null;
   let attempts = 0;
   while (status !== 'FINISHED' && status !== 'ERROR' && attempts < 24) {
     await sleep(10000);
     const statusRes = await axios.get(`${BASE_URL}/${containerId}`, {
-      params: { fields: 'status_code', access_token: ACCESS_TOKEN }
+      // 'status' carries an error subcode when status_code is ERROR --
+      // without it an ERROR gives no clue why, which is exactly what
+      // happened when the mono-audio bug first showed up here.
+      params: { fields: 'status_code,status', access_token: ACCESS_TOKEN }
     });
     status = statusRes.data.status_code;
-    console.log(`   Status: ${status} (${attempts + 1}/24)`);
+    statusDetail = statusRes.data.status;
+    console.log(`   Status: ${status}${statusDetail ? ` (${statusDetail})` : ''} (${attempts + 1}/24)`);
     attempts++;
   }
   if (status !== 'FINISHED') {
-    throw new Error(`Video processing failed with status: ${status}`);
+    throw new Error(`Video processing failed with status: ${status}${statusDetail ? ` -- ${statusDetail}` : ''}`);
   }
 }
 

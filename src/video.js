@@ -174,7 +174,9 @@ async function createVoiceoverReel(listing, voiceoverPath) {
   try {
     const probe = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${voiceoverPath}"`).toString().trim();
     duration = Math.ceil(parseFloat(probe)) + 1; // add 1 second buffer
-  } catch {}
+  } catch (probeErr) {
+    console.warn(`⚠️  Could not read voiceover duration, defaulting to ${duration}s:`, probeErr.message);
+  }
 
   const font = ffmpegEscape(fontPath);
   const filters = [
@@ -193,8 +195,13 @@ async function createVoiceoverReel(listing, voiceoverPath) {
         '-tune stillimage',
         '-c:a aac',
         '-b:a 192k',
-        // Mix music quietly + voiceover at full volume
-        `-filter_complex [1:a]volume=${VOICEOVER_MUSIC_VOLUME}[music];[2:a]volume=1.0[vo];[music][vo]amix=inputs=2:duration=first[aout]`,
+        // Mix music quietly + voiceover at full volume. amix collapses to
+        // mono when its inputs' channel layouts don't match cleanly (the
+        // ElevenLabs voiceover track is mono, the background music is
+        // stereo) -- Instagram's Reels processing rejected that output
+        // with status ERROR, so force the mixed result back to stereo
+        // explicitly rather than letting amix pick.
+        `-filter_complex [1:a]volume=${VOICEOVER_MUSIC_VOLUME}[music];[2:a]volume=1.0[vo];[music][vo]amix=inputs=2:duration=first,aformat=channel_layouts=stereo:sample_rates=44100[aout]`,
         '-map 0:v',
         '-map [aout]',
         '-pix_fmt yuv420p',

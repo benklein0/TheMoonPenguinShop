@@ -1,5 +1,6 @@
 // src/instagram.js
-// Uploads video to Cloudinary for public URL, then posts as Reel via Instagram Graph API
+// Uploads video to Cloudinary for public URL, then posts as Reel (and,
+// optionally, a Story) via Instagram Graph API
 
 const axios = require('axios');
 const fs = require('fs');
@@ -64,52 +65,84 @@ async function deleteFromCloudinary(publicId) {
   }
 }
 
+// Creates a media container for either a feed Reel or a Story.
+// (Stories only take video_url/media_type -- no caption, no share_to_feed.)
+async function createMediaContainer({ mediaType, videoUrl, caption }) {
+  const params = {
+    media_type: mediaType,
+    video_url: videoUrl,
+    access_token: ACCESS_TOKEN,
+  };
+  if (mediaType === 'REELS') {
+    params.caption = caption;
+    params.share_to_feed = true;
+  }
+  const res = await axios.post(`${BASE_URL}/${IG_USER_ID}/media`, null, { params });
+  return res.data.id;
+}
+
+async function waitForContainer(containerId) {
+  let status = 'IN_PROGRESS';
+  let attempts = 0;
+  while (status !== 'FINISHED' && status !== 'ERROR' && attempts < 24) {
+    await sleep(10000);
+    const statusRes = await axios.get(`${BASE_URL}/${containerId}`, {
+      params: { fields: 'status_code', access_token: ACCESS_TOKEN }
+    });
+    status = statusRes.data.status_code;
+    console.log(`   Status: ${status} (${attempts + 1}/24)`);
+    attempts++;
+  }
+  if (status !== 'FINISHED') {
+    throw new Error(`Video processing failed with status: ${status}`);
+  }
+}
+
+async function publishContainer(containerId) {
+  const publishRes = await axios.post(`${BASE_URL}/${IG_USER_ID}/media_publish`, null, {
+    params: { creation_id: containerId, access_token: ACCESS_TOKEN }
+  });
+  return publishRes.data.id;
+}
+
 async function uploadReel(videoPath, caption) {
-  // 1. Upload to Cloudinary to get public URL
+  // 1. Upload to Cloudinary to get a public URL (shared by the Reel and,
+  //    if enabled, the Story -- no need to upload the same file twice)
   const { publicUrl, publicId } = await uploadToCloudinary(videoPath);
 
   try {
-    // 2. Create Instagram media container
+    // 2. Create + publish the feed Reel
     console.log('📤 Creating Instagram media container...');
-    const containerRes = await axios.post(`${BASE_URL}/${IG_USER_ID}/media`, null, {
-      params: {
-        media_type: 'REELS',
-        video_url: publicUrl,
-        caption,
-        share_to_feed: true,
-        access_token: ACCESS_TOKEN
-      }
-    });
-
-    const containerId = containerRes.data.id;
+    const containerId = await createMediaContainer({ mediaType: 'REELS', videoUrl: publicUrl, caption });
     console.log(`📦 Container created: ${containerId}`);
 
-    // 3. Poll until video is processed
     console.log('⏳ Waiting for Instagram to process video...');
-    let status = 'IN_PROGRESS';
-    let attempts = 0;
-    while (status !== 'FINISHED' && status !== 'ERROR' && attempts < 24) {
-      await sleep(10000);
-      const statusRes = await axios.get(`${BASE_URL}/${containerId}`, {
-        params: { fields: 'status_code', access_token: ACCESS_TOKEN }
-      });
-      status = statusRes.data.status_code;
-      console.log(`   Status: ${status} (${attempts + 1}/24)`);
-      attempts++;
-    }
+    await waitForContainer(containerId);
 
-    if (status !== 'FINISHED') {
-      throw new Error(`Video processing failed with status: ${status}`);
-    }
-
-    // 4. Publish
     console.log('🚀 Publishing Reel...');
-    const publishRes = await axios.post(`${BASE_URL}/${IG_USER_ID}/media_publish`, null, {
-      params: { creation_id: containerId, access_token: ACCESS_TOKEN }
-    });
+    const mediaId = await publishContainer(containerId);
+    console.log(`✅ Reel published! Media ID: ${mediaId}`);
 
-    console.log(`✅ Reel published! Media ID: ${publishRes.data.id}`);
-    return publishRes.data.id;
+    // 3. Also share the same clip to Stories. Note: Instagram's Graph API
+    // does not support attaching a link sticker to a Story (confirmed
+    // against Meta's own docs -- "Publishing stickers (i.e., link, poll,
+    // location) is not supported"), so this is purely for extra reach /
+    // keeping the account active in followers' Stories tray. It does NOT
+    // replace the bio-link click-through -- that's still the caption + bio.
+    // Set POST_TO_STORY=false in the environment to disable.
+    if (process.env.POST_TO_STORY !== 'false') {
+      try {
+        console.log('📖 Sharing to Instagram Story...');
+        const storyContainerId = await createMediaContainer({ mediaType: 'STORIES', videoUrl: publicUrl });
+        await waitForContainer(storyContainerId);
+        const storyMediaId = await publishContainer(storyContainerId);
+        console.log(`✅ Story published! Media ID: ${storyMediaId}`);
+      } catch (storyErr) {
+        console.warn('⚠️  Story post failed (non-fatal):', storyErr.message);
+      }
+    }
+
+    return mediaId;
 
   } finally {
     // Always clean up Cloudinary

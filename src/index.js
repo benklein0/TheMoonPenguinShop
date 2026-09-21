@@ -85,7 +85,9 @@ async function runPipeline() {
       videoPath = await createReel(listing);
     }
 
-    await uploadReel(videoPath, caption);
+    // Trending audio only makes sense for standard reels -- a voiceover ad
+    // needs its narration to stay clearly audible, not replaced by a song.
+    await uploadReel(videoPath, caption, { useTrendingAudio: reelType === 'standard' });
 
     // Post to Pinterest if configured
     if ((process.env.PINTEREST_ACCESS_TOKEN || process.env.PINTEREST_REFRESH_TOKEN) && process.env.PINTEREST_BOARD_ID) {

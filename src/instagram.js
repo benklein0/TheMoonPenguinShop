@@ -36,12 +36,24 @@ async function getTrendingAudio() {
     return null;
   }
   try {
-    const res = await axios.get(`${FB_BASE_URL}/ig_audio`, {
-      params: { audio_type: 'music', user_id: FB_IG_USER_ID, access_token: FB_ACCESS_TOKEN },
-    });
-    const tracks = (res.data.data || []).filter(t => t.audio_id || t.id);
+    const fetchAudio = async (search_query) => {
+      const res = await axios.get(`${FB_BASE_URL}/ig_audio`, {
+        params: { audio_type: 'music', user_id: FB_IG_USER_ID, access_token: FB_ACCESS_TOKEN, ...(search_query ? { search_query } : {}) },
+      });
+      return (res.data.data || []).filter(t => t.audio_id || t.id);
+    };
+    // 1) the trending list; 2) if that's empty for this account, keyword
+    //    searches of the licensed library for moods that fit the shop.
+    let tracks = await fetchAudio();
     if (tracks.length === 0) {
-      console.warn('⚠️  Trending audio catalog returned no tracks');
+      const queries = ['cozy acoustic', 'lofi', 'whimsical', 'indie folk', 'soft piano', 'jazz cafe', 'chill pop', 'autumn'];
+      for (const q of queries.sort(() => Math.random() - 0.5).slice(0, 4)) {
+        tracks = await fetchAudio(q);
+        if (tracks.length) { console.log(`🎧 Trending list empty; using search "${q}" (${tracks.length} tracks)`); break; }
+      }
+    }
+    if (tracks.length === 0) {
+      console.warn('⚠️  Audio API returned no tracks (trending or search) for this account');
       return null;
     }
     // Random pick among the top results, skipping ones used recently.

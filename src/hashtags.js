@@ -80,17 +80,21 @@ Return ONLY a JSON object, no prose: {"tags": ["#tag1", "#tag2", ...]} with 25-4
   return tags;
 }
 
+let inflight = null; // avoid two simultaneous web searches (startup + first post)
 async function getTrendingTags() {
   const cached = readState('trending_hashtags', null);
   if (cached && cached.tags && Date.now() - cached.fetchedAt < TRENDING_MAX_AGE_MS) {
     return cached.tags;
   }
-  try {
-    return await refreshTrending();
-  } catch (err) {
-    console.warn('⚠️  Trending hashtag refresh failed (using fallback pool):', err.message);
-    return cached?.tags || [];
+  if (!inflight) {
+    inflight = refreshTrending()
+      .catch(err => {
+        console.warn('⚠️  Trending hashtag refresh failed (using fallback pool):', err.message);
+        return cached?.tags || [];
+      })
+      .finally(() => { inflight = null; });
   }
+  return inflight;
 }
 
 async function getHashtags(listing) {

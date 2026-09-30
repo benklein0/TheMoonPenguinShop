@@ -287,9 +287,21 @@ function runFfmpeg(args) {
   });
 }
 
-async function render(listing, { voiceoverPath = null } = {}) {
+async function render(listing, opts = {}) {
+  try {
+    return await renderOnce(listing, opts);
+  } catch (err) {
+    // One bad layout/motion combo shouldn't cost the whole post: retry once
+    // with the plainest look before giving up.
+    console.warn('⚠️  Render failed, retrying with card / zoom_in:', err.message.split('\n')[0]);
+    return renderOnce(listing, { ...opts, safe: true });
+  }
+}
+
+async function renderOnce(listing, { voiceoverPath = null, safe = false } = {}) {
   ensureDirs();
   const look = chooseLook();
+  if (safe) { look.layout = 'card'; look.motion = 'zoom_in'; console.log('🎨 Safe look: card / zoom_in'); }
 
   const rawImagePath = path.join(OUTPUT_DIR, 'product_raw.jpg');
   await downloadImage(listing.imageUrl, rawImagePath);

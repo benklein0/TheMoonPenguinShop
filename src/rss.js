@@ -175,6 +175,16 @@ async function getNextListing() {
   data.seen = [...new Set([...data.seen, ...allIds])].slice(-200);
 
   // Find unposted listings — prioritize newly seen first, then oldest unposted
+  // Etsy admin listings (reshipping fees, deposits, custom-order slots...)
+  // aren't products and should never become reels. Mark them done so they
+  // can't block the queue.
+  const NOT_A_PRODUCT = /re-?ship|shipping (cost|fee|upgrade)|custom order|deposit|reserved for|gift ?card|payment|balance due|additional cost/i;
+  const skipped = allItems.filter(i => NOT_A_PRODUCT.test(i.title) && !data.posted.includes(i.id));
+  if (skipped.length) {
+    skipped.forEach(i => console.log(`⏭️  Skipping non-product listing: ${i.title}`));
+    data.posted = [...data.posted, ...skipped.map(i => i.id)].slice(-500);
+  }
+
   const unposted = allItems.filter(item => !data.posted.includes(item.id));
 
   if (unposted.length === 0) {

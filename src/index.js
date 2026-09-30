@@ -5,7 +5,8 @@ const { getNextListing, markAsPosted } = require('./rss');
 const { generateCaption } = require('./caption');
 const { generateVoiceoverScript, generateVoiceover } = require('./voiceover');
 const { createReel, createVoiceoverReel, cleanup } = require('./video');
-const { uploadReel } = require('./instagram');
+const { uploadReel, checkTrendingAudio } = require('./instagram');
+const { getTrendingTags } = require('./hashtags');
 const { createPin } = require('./pinterest');
 const fs = require('fs');
 
@@ -85,9 +86,9 @@ async function runPipeline() {
       videoPath = await createReel(listing);
     }
 
-    // Trending audio only makes sense for standard reels -- a voiceover ad
-    // needs its narration to stay clearly audible, not replaced by a song.
-    await uploadReel(videoPath, caption, { useTrendingAudio: reelType === 'standard' });
+    // Standard reels: trending song replaces the baked-in music.
+    // Voiceover reels: trending song plays quietly underneath the narration.
+    await uploadReel(videoPath, caption, { audioMode: reelType === 'standard' ? 'replace' : 'under' });
 
     // Post to Pinterest if configured
     if ((process.env.PINTEREST_ACCESS_TOKEN || process.env.PINTEREST_REFRESH_TOKEN) && process.env.PINTEREST_BOARD_ID) {
@@ -122,6 +123,14 @@ POST_TIMES.forEach(({ cron: cronTime, label }) => {
 
 console.log('\n🐧 MoonPenguinPoster is running.');
 console.log('   Posting daily: 9am, 1pm, 5pm ET\n');
+
+// Startup diagnostics (no posting): confirms the trending-audio API works and
+// warms the trending-hashtag cache, so problems show up in the deploy logs
+// right away instead of at the next scheduled post.
+(async () => {
+  try { await checkTrendingAudio(); } catch (e) { console.warn('Audio check error:', e.message); }
+  try { await getTrendingTags(); } catch (e) { console.warn('⚠️  Trending hashtag refresh failed:', e.message); }
+})();
 
 if (process.env.RUN_NOW === 'true') {
   console.log('🚀 RUN_NOW=true detected, running pipeline immediately...');

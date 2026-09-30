@@ -4,6 +4,7 @@
 
 const axios = require('axios');
 const fs = require('fs');
+const { readState, writeState } = require('./state');
 const FormData = require('form-data');
 
 const IG_USER_ID = process.env.IG_USER_ID;
@@ -24,27 +25,35 @@ const FB_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_IG_USER_ID = process.env.IG_BUSINESS_ACCOUNT_ID;
 const FB_BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
 
-// Fetch a trending/popular audio track from Instagram's own audio catalog.
-// Returns an audio_id to attach to a Reel container, or null if unavailable
-// (missing Facebook Login credentials, API error, or empty catalog) so the
-// caller can fall back to the video's existing local background music.
-async function getTrendingAudioId() {
-  if (!FB_ACCESS_TOKEN || !FB_IG_USER_ID) return null;
+// Fetch a trending music track from Instagram's Audio API.
+// Per Meta's docs the endpoint is GET graph.facebook.com/ig_audio with
+// user_id as a query param (NOT /{ig-user-id}/ig_audio, which is what the
+// old code called and why it logged "Unknown path components: /ig_audio").
+// Omitting search_query returns trending audio. Returns { id, title } or null.
+async function getTrendingAudio() {
+  if (!FB_ACCESS_TOKEN || !FB_IG_USER_ID) {
+    console.warn('⚠️  Trending audio skipped: FB_PAGE_ACCESS_TOKEN / IG_BUSINESS_ACCOUNT_ID not set');
+    return null;
+  }
   try {
-    const res = await axios.get(`${FB_BASE_URL}/${FB_IG_USER_ID}/ig_audio`, {
-      params: { audio_type: 'music', access_token: FB_ACCESS_TOKEN }
+    const res = await axios.get(`${FB_BASE_URL}/ig_audio`, {
+      params: { audio_type: 'music', user_id: FB_IG_USER_ID, access_token: FB_ACCESS_TOKEN },
     });
-    const tracks = res.data.data || [];
+    const tracks = (res.data.data || []).filter(t => t.audio_id || t.id);
     if (tracks.length === 0) {
       console.warn('⚠️  Trending audio catalog returned no tracks');
       return null;
     }
-    // Pick randomly among the top results for variety across posts,
-    // rather than hammering the same track every time.
-    const pool = tracks.slice(0, Math.min(10, tracks.length));
-    const pick = pool[Math.floor(Math.random() * pool.length)];
-    console.log(`🎧 Trending audio selected: ${pick.audio_name || pick.id}`);
-    return pick.id;
+    // Random pick among the top results, skipping ones used recently.
+    const recent = readState('recent_audio', []);
+    const pool = tracks.slice(0, Math.min(15, tracks.length));
+    const fresh = pool.filter(t => !recent.includes(t.audio_id || t.id));
+    const pick = (fresh.length ? fresh : pool)[Math.floor(Math.random() * (fresh.length || pool.length))];
+    const id = pick.audio_id || pick.id;
+    writeState('recent_audio', [...recent, id].slice(-10));
+    const title = [pick.title, pick.display_artist].filter(Boolean).join(' - ') || id;
+    console.log(`🎧 Trending audio selected: ${title} (of ${tracks.length} available)`);
+    return { id, title };
   } catch (err) {
     console.warn('⚠️  Could not fetch trending audio (non-fatal):', err.response?.data?.error?.message || err.message);
     return null;
@@ -102,43 +111,48 @@ async function deleteFromCloudinary(publicId) {
   }
 }
 
+// Two ways to talk to the Instagram API:
+//  - IG: Instagram Login (graph.instagram.com + IG_ACCESS_TOKEN) -- does all
+//        normal posting.
+//  - FB: Facebook Login (graph.facebook.com + Page token) -- the documented
+//        home of the Audio API, used as a fallback when attaching audio.
+const IG_API = { name: 'instagram', base: BASE_URL, token: ACCESS_TOKEN, userId: IG_USER_ID };
+const FB_API = { name: 'facebook', base: FB_BASE_URL, token: FB_ACCESS_TOKEN, userId: FB_IG_USER_ID };
+
 // Creates a media container for either a feed Reel or a Story.
 // (Stories only take video_url/media_type -- no caption, no share_to_feed.)
-// audioId, when provided, attaches a trending audio track to the Reel and
-// mutes the video's own baked-in track so the trending song carries it
-// cleanly instead of layering over the local background music.
-async function createMediaContainer({ mediaType, videoUrl, caption, audioId }) {
+// audio = { id, audioVolume, videoVolume } attaches an Instagram audio track;
+// volumes are integers 0-100 per the Audio API docs.
+async function createMediaContainer({ api = IG_API, mediaType, videoUrl, caption, audio }) {
   const params = {
     media_type: mediaType,
     video_url: videoUrl,
-    access_token: ACCESS_TOKEN,
+    access_token: api.token,
   };
   if (mediaType === 'REELS') {
     params.caption = caption;
     params.share_to_feed = true;
   }
-  if (audioId) {
+  if (audio) {
     params.audio_configuration = JSON.stringify({
-      audio_id: audioId,
-      audio_volume: 1.0,
-      video_volume: 0.0,
+      audio_id: audio.id,
+      audio_volume: audio.audioVolume,
+      video_volume: audio.videoVolume,
     });
   }
-  const res = await axios.post(`${BASE_URL}/${IG_USER_ID}/media`, null, { params });
+  const res = await axios.post(`${api.base}/${api.userId}/media`, null, { params });
   return res.data.id;
 }
 
-async function waitForContainer(containerId) {
+async function waitForContainer(containerId, api = IG_API) {
   let status = 'IN_PROGRESS';
   let statusDetail = null;
   let attempts = 0;
   while (status !== 'FINISHED' && status !== 'ERROR' && attempts < 24) {
     await sleep(10000);
-    const statusRes = await axios.get(`${BASE_URL}/${containerId}`, {
-      // 'status' carries an error subcode when status_code is ERROR --
-      // without it an ERROR gives no clue why, which is exactly what
-      // happened when the mono-audio bug first showed up here.
-      params: { fields: 'status_code,status', access_token: ACCESS_TOKEN }
+    const statusRes = await axios.get(`${api.base}/${containerId}`, {
+      // 'status' carries an error subcode when status_code is ERROR.
+      params: { fields: 'status_code,status', access_token: api.token }
     });
     status = statusRes.data.status_code;
     statusDetail = statusRes.data.status;
@@ -150,43 +164,71 @@ async function waitForContainer(containerId) {
   }
 }
 
-async function publishContainer(containerId) {
-  const publishRes = await axios.post(`${BASE_URL}/${IG_USER_ID}/media_publish`, null, {
-    params: { creation_id: containerId, access_token: ACCESS_TOKEN }
+async function publishContainer(containerId, api = IG_API) {
+  const publishRes = await axios.post(`${api.base}/${api.userId}/media_publish`, null, {
+    params: { creation_id: containerId, access_token: api.token }
   });
   return publishRes.data.id;
 }
 
-async function uploadReel(videoPath, caption, { useTrendingAudio = false } = {}) {
-  // 1. Upload to Cloudinary to get a public URL (shared by the Reel and,
-  //    if enabled, the Story -- no need to upload the same file twice)
+const errMsg = err => err.response?.data?.error?.message || err.message;
+
+// Create + process + publish a Reel. If trending audio is requested, try
+// attaching it via Instagram Login first, then via Facebook Login, and
+// finally fall back to posting with the video's own music -- a post always
+// goes out.
+async function publishReel(publicUrl, caption, audio) {
+  const attempts = [];
+  if (audio) {
+    // Facebook Login host first: it's where Meta documents the Audio API.
+    if (FB_ACCESS_TOKEN && FB_IG_USER_ID) attempts.push({ api: FB_API, audio });
+    attempts.push({ api: IG_API, audio });
+  }
+  attempts.push({ api: IG_API, audio: null });
+
+  let lastErr;
+  for (const { api, audio: a } of attempts) {
+    try {
+      console.log(`📤 Creating Reel container via ${api.name}${a ? ` with trending audio` : ''}...`);
+      const containerId = await createMediaContainer({ api, mediaType: 'REELS', videoUrl: publicUrl, caption, audio: a });
+      console.log(`📦 Container created: ${containerId}`);
+      console.log('⏳ Waiting for Instagram to process video...');
+      await waitForContainer(containerId, api);
+      console.log('🚀 Publishing Reel...');
+      const mediaId = await publishContainer(containerId, api);
+      console.log(`✅ Reel published${a ? ' with trending audio' : ''}! Media ID: ${mediaId}`);
+      return mediaId;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`⚠️  Reel attempt via ${api.name}${a ? ' with audio' : ''} failed: ${errMsg(err)}`);
+    }
+  }
+  throw lastErr;
+}
+
+// audioMode: 'replace' (trending song only, for standard reels),
+//            'under'   (trending song quietly under the voiceover), or
+//            'none'.
+async function uploadReel(videoPath, caption, { audioMode = 'none' } = {}) {
+  // 1. Upload to Cloudinary to get a public URL (shared by Reel + Story)
   const { publicUrl, publicId } = await uploadToCloudinary(videoPath);
 
-  // Trending audio is opt-in per call (standard reels only -- voiceover
-  // reels need their narration audible, not swapped for a song) and quietly
-  // does nothing if Facebook Login credentials aren't set up or the catalog
-  // call fails, so this never blocks a post from going out.
-  const audioId = useTrendingAudio ? await getTrendingAudioId() : null;
+  let audio = null;
+  if (audioMode !== 'none' && process.env.USE_TRENDING_AUDIO !== 'false') {
+    const track = await getTrendingAudio();
+    if (track) {
+      audio = audioMode === 'under'
+        ? { id: track.id, audioVolume: 12, videoVolume: 100 }
+        : { id: track.id, audioVolume: 100, videoVolume: 0 };
+    }
+  }
 
   try {
     // 2. Create + publish the feed Reel
-    console.log('📤 Creating Instagram media container...');
-    const containerId = await createMediaContainer({ mediaType: 'REELS', videoUrl: publicUrl, caption, audioId });
-    console.log(`📦 Container created: ${containerId}`);
+    const mediaId = await publishReel(publicUrl, caption, audio);
 
-    console.log('⏳ Waiting for Instagram to process video...');
-    await waitForContainer(containerId);
-
-    console.log('🚀 Publishing Reel...');
-    const mediaId = await publishContainer(containerId);
-    console.log(`✅ Reel published! Media ID: ${mediaId}`);
-
-    // 3. Also share the same clip to Stories. Note: Instagram's Graph API
-    // does not support attaching a link sticker to a Story (confirmed
-    // against Meta's own docs -- "Publishing stickers (i.e., link, poll,
-    // location) is not supported"), so this is purely for extra reach /
-    // keeping the account active in followers' Stories tray. It does NOT
-    // replace the bio-link click-through -- that's still the caption + bio.
+    // 3. Also share the same clip to Stories. (The Graph API can't add link
+    // stickers to Stories, so this is for reach, not click-through.)
     // Set POST_TO_STORY=false in the environment to disable.
     if (process.env.POST_TO_STORY !== 'false') {
       try {
@@ -196,7 +238,7 @@ async function uploadReel(videoPath, caption, { useTrendingAudio = false } = {})
         const storyMediaId = await publishContainer(storyContainerId);
         console.log(`✅ Story published! Media ID: ${storyMediaId}`);
       } catch (storyErr) {
-        console.warn('⚠️  Story post failed (non-fatal):', storyErr.message);
+        console.warn('⚠️  Story post failed (non-fatal):', errMsg(storyErr));
       }
     }
 
@@ -208,4 +250,11 @@ async function uploadReel(videoPath, caption, { useTrendingAudio = false } = {})
   }
 }
 
-module.exports = { uploadReel };
+// Startup diagnostic: logs whether the Audio API is reachable, without posting.
+async function checkTrendingAudio() {
+  console.log('🩺 Checking trending audio access...');
+  const track = await getTrendingAudio();
+  console.log(track ? '🩺 Trending audio: OK' : '🩺 Trending audio: NOT available (see warning above)');
+}
+
+module.exports = { uploadReel, checkTrendingAudio };

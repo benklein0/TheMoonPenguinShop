@@ -2,8 +2,28 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
+const { readState, pushRecent, pickFresh, textFromMessage } = require('./state');
+const { getHashtags } = require('./hashtags');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Rotating caption structures so posts don't all read the same way.
+const CAPTION_STYLES = [
+  { id: 'review', text: 'Lead with a short quote or paraphrase from the customer review, then introduce the piece.' },
+  { id: 'detail', text: 'Open with one vivid visual detail of the piece, then say what it is.' },
+  { id: 'use', text: 'Open with the everyday moment it is for (in your bag, on your nightstand, on the go), then the piece.' },
+  { id: 'gift', text: 'Frame it as a gift for a specific kind of person.' },
+  { id: 'maker', text: 'Open with how it is made (small-batch, brass set into resin by hand).' },
+  { id: 'short', text: 'Keep it very short and punchy: two sentences.' },
+];
+
+// Handmade has to be prominent (mom's requirement), but the exact wording was
+// getting repetitive ("lovingly handcrafted" on nearly every post).
+const HANDMADE_PHRASES = [
+  'made by hand', 'handmade in small batches', 'handcrafted one at a time',
+  'handmade, so no two are exactly alike', 'set by hand', 'handmade in our studio',
+  'a one-of-a-kind handmade piece',
+];
 
 function getRandomReview() {
   try {
@@ -19,41 +39,46 @@ function getRandomReview() {
 async function generateCaption(listing) {
   console.log(`✍️  Generating caption for: ${listing.title}`);
 
-  const review = getRandomReview();
-  const reviewSection = review
-    ? `\nA recent customer review to naturally reference or quote: "${review.text}" — ${review.author}`
-    : '';
+  const history = readState('caption_history', []);
+  const style = pickFresh(CAPTION_STYLES, history.slice(-3).map(h => h.style));
+  const handmade = pickFresh(HANDMADE_PHRASES, history.slice(-4).map(h => h.handmade));
+  const recentOpenings = history.slice(-8).map(h => h.text.split(/\s+/).slice(0, 6).join(' '));
+  const review = style.id === 'review' || Math.random() < 0.3 ? getRandomReview() : null;
 
-  const prompt = `You are a social media manager for TheMoonPenguinShop, a handmade Etsy shop that sells beautiful brass figural resin accessories like keychains, compact mirrors, and bag hooks. The shop has a whimsical, feminine, artsy aesthetic.
+  const prompt = `You are the social media manager for TheMoonPenguinShop, a handmade Etsy shop selling brass figural resin accessories (keychains, compact mirrors, pill boxes, bag hooks). Whimsical, feminine, artsy.
 
-Write an engaging Instagram Reels caption for this product listing:
-
+Write an Instagram Reels caption for:
 Title: ${listing.title}
 ${listing.price ? `Price: ${listing.price}` : ''}
-${listing.description ? `Description: ${listing.description}` : ''}
-${reviewSection}
+${listing.description ? `Description: ${listing.description.substring(0, 600)}` : ''}
+${review ? `Customer review you may quote or paraphrase: "${review.text}" (${review.author})` : ''}
+
+Structure: ${style.text}
 
 Requirements:
-- 2-4 sentences max, warm and enthusiastic tone
-- ALWAYS emphasize that the item is handmade — use phrases like "handcrafted by hand", "made by hand", "one-of-a-kind handmade piece", "lovingly handcrafted" etc. This must be prominent, not an afterthought
-- If a review is provided, naturally weave in a short quote or paraphrase from it (e.g. "Customers are saying..." or "One happy customer called it...")
-- Do NOT include any URLs or links in the caption
-- End with a natural call to action referencing the link in bio
-- End with 15-20 relevant hashtags on a new line
-- Hashtags should include: #themoonpenguinshop, niche product tags, aesthetic tags (#cottagecore, #darkacademia, #witchyvibes, #resinart, #handmadejewelry etc.), and shopping tags (#etsyshop, #handmade, #smallbusiness)
-- Do NOT use emojis in the caption text, only in hashtags if appropriate
-- Keep the caption text itself under 300 characters (not counting hashtags)
+- 2-4 sentences, under 300 characters.
+- Make it clear it is handmade; work in this phrasing or a close variation: "${handmade}". Do NOT use "lovingly handcrafted".
+- End with a natural call to action pointing to the link in bio (vary the wording).
+- No URLs, no emojis, NO hashtags (those are added separately).
+- Do not start like any of these recent captions:
+${recentOpenings.length ? recentOpenings.map(o => `  - "${o}..."`).join('\n') : '  (none yet)'}
 
-Return ONLY the caption text + hashtags, nothing else.`;
+Return ONLY the caption text.`;
 
   const message = await client.messages.create({
     model: 'claude-opus-4-5',
-    max_tokens: 400,
-    messages: [{ role: 'user', content: prompt }]
+    max_tokens: 300,
+    temperature: 1,
+    messages: [{ role: 'user', content: prompt }],
   });
 
-  const caption = message.content[0].text.trim();
-  console.log(`✅ Caption generated.`);
+  // Strip any hashtags the model slipped in anyway; we add our own 5.
+  const text = textFromMessage(message).replace(/(^|\s)#[A-Za-z0-9_]+/g, '').trim();
+  pushRecent('caption_history', { style: style.id, handmade, text }, 20);
+
+  const hashtags = await getHashtags(listing);
+  const caption = `${text}\n\n${hashtags.join(' ')}`;
+  console.log(`✅ Caption generated (${style.id}).`);
   return caption;
 }
 

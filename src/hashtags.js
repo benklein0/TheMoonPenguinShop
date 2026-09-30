@@ -5,6 +5,7 @@
 // approach wastes most of them. Instead we pick 5 targeted ones:
 //   1. #themoonpenguinshop (brand, always)
 //   2-5. Chosen per product by Claude from a candidate pool made of
+//        (a0) Meta Muse's daily trending-tag file (hashtags branch), then
 //        (a) currently-trending tags researched with web search, refreshed
 //            every few days and cached on the ./data volume,
 //        (b) seasonal tags for the current month, and
@@ -80,8 +81,45 @@ Return ONLY a JSON object, no prose: {"tags": ["#tag1", "#tag2", ...]} with 25-4
   return tags;
 }
 
+// Daily hashtag research pushed by Meta Muse to the `hashtags` branch
+// (never `main`, so it doesn't trigger a Railway redeploy). Format:
+//   {"date":"YYYY-MM-DD","slots":{"09":[...],"13":[...],"17":[...]}}
+// Returns [] if the file is missing, malformed or more than 2 days old.
+const MUSE_URL = process.env.MUSE_HASHTAG_URL ||
+  'https://raw.githubusercontent.com/benklein0/TheMoonPenguinShop/hashtags/hashtags.json';
+const MUSE_MAX_AGE_DAYS = 2;
+
+async function getMuseTags() {
+  try {
+    const res = await fetch(MUSE_URL, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const ageDays = (Date.parse(todayET) - Date.parse(data.date)) / 86400000;
+    if (!(ageDays >= 0 && ageDays <= MUSE_MAX_AGE_DAYS)) throw new Error(`stale or bad date: ${data.date}`);
+    const tags = [...new Set(Object.values(data.slots || {}).flat()
+      .filter(t => typeof t === 'string' && /^#?[A-Za-z0-9_]{2,40}$/.test(t.trim()))
+      .map(normalize).filter(Boolean))].slice(0, 30);
+    if (tags.length < 3) throw new Error(`only ${tags.length} usable tags`);
+    console.log(`🧠 Muse hashtags (${data.date}): ${tags.length} tags`);
+    return tags;
+  } catch (err) {
+    console.warn('⚠️  Muse hashtag file unavailable (using own research):', err.message);
+    return [];
+  }
+}
+
 let inflight = null; // avoid two simultaneous web searches (startup + first post)
 async function getTrendingTags() {
+  // Muse's fresh daily file comes first; our own (3-day cached) research fills
+  // in behind it. If Muse is fresh we don't spend a web search refreshing ours.
+  const muse = await getMuseTags();
+  const cachedOwn = readState('trending_hashtags', null);
+  if (muse.length) return [...new Set([...muse, ...(cachedOwn?.tags || [])])];
+  return getOwnTrendingTags();
+}
+
+async function getOwnTrendingTags() {
   const cached = readState('trending_hashtags', null);
   if (cached && cached.tags && Date.now() - cached.fetchedAt < TRENDING_MAX_AGE_MS) {
     return cached.tags;

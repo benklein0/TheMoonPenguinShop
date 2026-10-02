@@ -25,52 +25,100 @@ const FB_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_IG_USER_ID = process.env.IG_BUSINESS_ACCOUNT_ID;
 const FB_BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
 
-// Fetch a trending music track from Instagram's Audio API.
-// Per Meta's docs the endpoint is GET graph.facebook.com/ig_audio with
-// user_id as a query param (NOT /{ig-user-id}/ig_audio, which is what the
-// old code called and why it logged "Unknown path components: /ig_audio").
-// Omitting search_query returns trending audio. Returns { id, title } or null.
+// ---- Trending audio -------------------------------------------------------
+// The Audio API has returned an empty list for every call so far without an
+// error, so we don't know which piece is wrong (endpoint form, token type,
+// account id, missing permission). Instead of guessing, try every plausible
+// request shape and remember the first one that actually returns tracks.
+const IG_AUDIO_ID = FB_IG_USER_ID || IG_USER_ID;
+const AUDIO_SOURCES = [
+  { name: 'fb-root',      host: FB_BASE_URL, token: () => FB_ACCESS_TOKEN, path: () => '/ig_audio',            params: () => ({ user_id: IG_AUDIO_ID }) },
+  { name: 'fb-user-edge', host: FB_BASE_URL, token: () => FB_ACCESS_TOKEN, path: () => `/${IG_AUDIO_ID}/ig_audio`, params: () => ({}) },
+  { name: 'ig-root',      host: BASE_URL,    token: () => ACCESS_TOKEN,    path: () => '/ig_audio',            params: () => ({ user_id: IG_USER_ID }) },
+  { name: 'ig-user-edge', host: BASE_URL,    token: () => ACCESS_TOKEN,    path: () => `/${IG_USER_ID}/ig_audio`, params: () => ({}) },
+];
+const SEARCHES = ['cozy acoustic', 'lofi', 'whimsical', 'indie folk', 'soft piano', 'jazz cafe', 'chill pop', 'autumn', 'happy', 'love'];
+
+async function fetchAudio(src, { search_query, audio_type = 'music' } = {}) {
+  const token = src.token();
+  if (!token) throw new Error('token not set');
+  const res = await axios.get(`${src.host}${src.path()}`, {
+    params: { ...src.params(), ...(audio_type ? { audio_type } : {}), ...(search_query ? { search_query } : {}), access_token: token },
+    timeout: 15000,
+  });
+  return { raw: res.data, tracks: (res.data?.data || []).filter(t => t.audio_id || t.id) };
+}
+
+// Returns { id, title } or null. Never throws.
 async function getTrendingAudio() {
-  if (!FB_ACCESS_TOKEN || !FB_IG_USER_ID) {
-    console.warn('⚠️  Trending audio skipped: FB_PAGE_ACCESS_TOKEN / IG_BUSINESS_ACCOUNT_ID not set');
-    return null;
-  }
-  try {
-    const fetchAudio = async (search_query) => {
-      const res = await axios.get(`${FB_BASE_URL}/ig_audio`, {
-        params: { audio_type: 'music', user_id: FB_IG_USER_ID, access_token: FB_ACCESS_TOKEN, ...(search_query ? { search_query } : {}) },
-      });
-      return (res.data.data || []).filter(t => t.audio_id || t.id);
-    };
-    // 1) the trending list; 2) if that's empty for this account, keyword
-    //    searches of the licensed library for moods that fit the shop.
-    let tracks = await fetchAudio();
-    if (tracks.length === 0) {
-      const queries = ['cozy acoustic', 'lofi', 'whimsical', 'indie folk', 'soft piano', 'jazz cafe', 'chill pop', 'autumn'];
-      for (const q of queries.sort(() => Math.random() - 0.5).slice(0, 4)) {
-        tracks = await fetchAudio(q);
-        if (tracks.length) { console.log(`🎧 Trending list empty; using search "${q}" (${tracks.length} tracks)`); break; }
+  const remembered = readState('audio_source', null);
+  const order = [...AUDIO_SOURCES].sort((a, b) => (b.name === remembered) - (a.name === remembered));
+  const queries = [undefined, ...SEARCHES.sort(() => Math.random() - 0.5).slice(0, 3)];
+  for (const src of order) {
+    if (!src.token()) continue;
+    for (const q of queries) {
+      try {
+        const { tracks } = await fetchAudio(src, { search_query: q });
+        if (!tracks.length) continue;
+        if (remembered !== src.name) writeState('audio_source', src.name);
+        const recent = readState('recent_audio', []);
+        const pool = tracks.slice(0, Math.min(15, tracks.length));
+        const fresh = pool.filter(t => !recent.includes(t.audio_id || t.id));
+        const pick = (fresh.length ? fresh : pool)[Math.floor(Math.random() * (fresh.length || pool.length))];
+        const id = pick.audio_id || pick.id;
+        writeState('recent_audio', [...recent, id].slice(-10));
+        const title = [pick.title, pick.display_artist].filter(Boolean).join(' - ') || id;
+        console.log(`🎧 Audio selected via ${src.name}${q ? ` (search "${q}")` : ' (trending)'}: ${title} (of ${tracks.length})`);
+        return { id, title, api: src.host === FB_BASE_URL ? 'facebook' : 'instagram' };
+      } catch (err) {
+        // A path error on one shape just means try the next shape.
+        if (!q) { console.warn(`   audio ${src.name}: ${errMsg(err)}`); break; }
       }
     }
-    if (tracks.length === 0) {
-      console.warn('⚠️  Audio API returned no tracks (trending or search) for this account');
-      return null;
-    }
-    // Random pick among the top results, skipping ones used recently.
-    const recent = readState('recent_audio', []);
-    const pool = tracks.slice(0, Math.min(15, tracks.length));
-    const fresh = pool.filter(t => !recent.includes(t.audio_id || t.id));
-    const pick = (fresh.length ? fresh : pool)[Math.floor(Math.random() * (fresh.length || pool.length))];
-    const id = pick.audio_id || pick.id;
-    writeState('recent_audio', [...recent, id].slice(-10));
-    const title = [pick.title, pick.display_artist].filter(Boolean).join(' - ') || id;
-    console.log(`🎧 Trending audio selected: ${title} (of ${tracks.length} available)`);
-    return { id, title };
-  } catch (err) {
-    console.warn('⚠️  Could not fetch trending audio (non-fatal):', err.response?.data?.error?.message || err.message);
-    return null;
   }
+  console.warn('⚠️  No audio tracks from any Audio API request shape (see 🩺 diagnosis in startup logs)');
+  return null;
 }
+
+// One-time startup report: shows exactly what Meta says about the token,
+// the linked accounts, and each audio request shape, so the next fix is
+// based on facts instead of guesses. Read-only; never posts.
+async function diagnoseAudio() {
+  const cut = o => { const t = JSON.stringify(o); return t.length > 500 ? t.slice(0, 500) + '…' : t; };
+  const get = async (url, params) => {
+    try { return (await axios.get(url, { params, timeout: 15000 })).data; }
+    catch (err) { return { error: err.response?.data?.error || err.message }; }
+  };
+  console.log('🩺 ---- Audio API diagnosis ----');
+  console.log(`🩺 env: FB_PAGE_ACCESS_TOKEN=${FB_ACCESS_TOKEN ? 'set' : 'MISSING'} IG_BUSINESS_ACCOUNT_ID=${FB_IG_USER_ID || 'MISSING'} IG_USER_ID=${IG_USER_ID || 'MISSING'} FB_PAGE_ID=${process.env.FB_PAGE_ID || 'MISSING'}`);
+  if (FB_ACCESS_TOKEN) {
+    const dbg = await get(`${FB_BASE_URL}/debug_token`, { input_token: FB_ACCESS_TOKEN, access_token: FB_ACCESS_TOKEN });
+    const d = dbg.data || dbg;
+    console.log(`🩺 FB token: valid=${d.is_valid} type=${d.type} app=${d.app_id} expires=${d.expires_at} scopes=${(d.scopes || []).join(',')} ${d.error ? cut(d.error) : ''}`);
+    console.log(`🩺 FB /me: ${cut(await get(`${FB_BASE_URL}/me`, { fields: 'id,name', access_token: FB_ACCESS_TOKEN }))}`);
+    if (process.env.FB_PAGE_ID) {
+      console.log(`🩺 Page→IG link: ${cut(await get(`${FB_BASE_URL}/${process.env.FB_PAGE_ID}`, { fields: 'instagram_business_account{id,username}', access_token: FB_ACCESS_TOKEN }))}`);
+    }
+  }
+  if (ACCESS_TOKEN) {
+    console.log(`🩺 IG /me: ${cut(await get(`${BASE_URL}/me`, { fields: 'user_id,username,account_type', access_token: ACCESS_TOKEN }))}`);
+  }
+  for (const src of AUDIO_SOURCES) {
+    if (!src.token()) { console.log(`🩺 ${src.name}: skipped (no token)`); continue; }
+    for (const opts of [{}, { audio_type: null }, { search_query: 'love' }]) {
+      const label = opts.search_query ? 'search "love"' : opts.audio_type === null ? 'no audio_type' : 'trending';
+      try {
+        const { raw, tracks } = await fetchAudio(src, opts);
+        console.log(`🩺 ${src.name} ${label}: ${tracks.length} tracks ${cut(raw)}`);
+      } catch (err) {
+        console.log(`🩺 ${src.name} ${label}: ERROR ${cut(err.response?.data?.error || err.message)}`);
+      }
+    }
+  }
+  console.log('🩺 ---- end diagnosis ----');
+}
+
+const errMsg = err => err.response?.data?.error?.message || err.message;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -183,8 +231,6 @@ async function publishContainer(containerId, api = IG_API) {
   return publishRes.data.id;
 }
 
-const errMsg = err => err.response?.data?.error?.message || err.message;
-
 // Create + process + publish a Reel. If trending audio is requested, try
 // attaching it via Instagram Login first, then via Facebook Login, and
 // finally fall back to posting with the video's own music -- a post always
@@ -192,9 +238,9 @@ const errMsg = err => err.response?.data?.error?.message || err.message;
 async function publishReel(publicUrl, caption, audio) {
   const attempts = [];
   if (audio) {
-    // Facebook Login host first: it's where Meta documents the Audio API.
-    if (FB_ACCESS_TOKEN && FB_IG_USER_ID) attempts.push({ api: FB_API, audio });
-    attempts.push({ api: IG_API, audio });
+    // Attach via the same API that returned the track first, then the other.
+    const apis = audio.api === 'instagram' ? [IG_API, FB_API] : [FB_API, IG_API];
+    for (const api of apis) if (api.token && api.userId) attempts.push({ api, audio });
   }
   attempts.push({ api: IG_API, audio: null });
 
@@ -230,8 +276,8 @@ async function uploadReel(videoPath, caption, { audioMode = 'none' } = {}) {
     const track = await getTrendingAudio();
     if (track) {
       audio = audioMode === 'under'
-        ? { id: track.id, audioVolume: 12, videoVolume: 100 }
-        : { id: track.id, audioVolume: 100, videoVolume: 0 };
+        ? { id: track.id, api: track.api, audioVolume: 12, videoVolume: 100 }
+        : { id: track.id, api: track.api, audioVolume: 100, videoVolume: 0 };
     }
   }
 
@@ -264,7 +310,7 @@ async function uploadReel(videoPath, caption, { audioMode = 'none' } = {}) {
 
 // Startup diagnostic: logs whether the Audio API is reachable, without posting.
 async function checkTrendingAudio() {
-  console.log('🩺 Checking trending audio access...');
+  await diagnoseAudio();
   const track = await getTrendingAudio();
   console.log(track ? '🩺 Trending audio: OK' : '🩺 Trending audio: NOT available (see warning above)');
 }

@@ -46,7 +46,10 @@ async function fetchAudio(src, { search_query, audio_type = 'music' } = {}) {
     params: { ...src.params(), ...(audio_type ? { audio_type } : {}), ...(search_query ? { search_query } : {}), access_token: token },
     timeout: 15000,
   });
-  return { raw: res.data, tracks: (res.data?.data || []).filter(t => t.audio_id || t.id) };
+  // Meta returns the list under "audio" (not the usual "data") -- reading
+  // only "data" is why every call looked empty before.
+  const list = res.data?.audio || res.data?.data || [];
+  return { raw: res.data, tracks: list.filter(t => t.audio_id || t.id) };
 }
 
 // Returns { id, title } or null. Never throws.
@@ -72,7 +75,7 @@ async function getTrendingAudio() {
         return { id, title, api: src.host === FB_BASE_URL ? 'facebook' : 'instagram' };
       } catch (err) {
         // A path error on one shape just means try the next shape.
-        if (!q) { console.warn(`   audio ${src.name}: ${errMsg(err)}`); break; }
+        if (!q) { if (process.env.DIAGNOSE_AUDIO === 'true') console.warn(`   audio ${src.name}: ${errMsg(err)}`); break; }
       }
     }
   }
@@ -310,7 +313,9 @@ async function uploadReel(videoPath, caption, { audioMode = 'none' } = {}) {
 
 // Startup diagnostic: logs whether the Audio API is reachable, without posting.
 async function checkTrendingAudio() {
-  await diagnoseAudio();
+  // Full report only on request (set DIAGNOSE_AUDIO=true in Railway).
+  if (process.env.DIAGNOSE_AUDIO === 'true') await diagnoseAudio();
+  else console.log('🩺 Checking trending audio access...');
   const track = await getTrendingAudio();
   console.log(track ? '🩺 Trending audio: OK' : '🩺 Trending audio: NOT available (see warning above)');
 }

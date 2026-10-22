@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { readState, pushRecent, pickFresh, textFromMessage } = require('./state');
 const { getHashtags } = require('./hashtags');
+const { DISPLAY } = require('./links');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -77,7 +78,7 @@ Return ONLY the caption text.`;
   pushRecent('caption_history', { style: style.id, handmade, text }, 20);
 
   const hashtags = await getHashtags(listing);
-  const caption = `${text}\n\n${hashtags.join(' ')}`;
+  const caption = `${text}\n\n🛍️ ${DISPLAY}\n\n${hashtags.join(' ')}`;
   console.log(`✅ Caption generated (${style.id}).`);
   return caption;
 }

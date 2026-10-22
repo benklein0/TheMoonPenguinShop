@@ -19,6 +19,7 @@
 // cleared.
 
 const axios = require('axios');
+const { siteUrl } = require('./links');
 const fs = require('fs');
 const path = require('path');
 
@@ -28,24 +29,39 @@ const PINTEREST_BOARD_ID = process.env.PINTEREST_BOARD_ID;
 const BASE_URL = 'https://api.pinterest.com/v5';
 const TOKEN_FILE = path.join(__dirname, '..', 'data', 'pinterest_token.json');
 
-function loadTokens() {
-  if (fs.existsSync(TOKEN_FILE)) {
-    return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
-  }
-  // First run ever: seed from env vars. expires_at is left at 0 so the
-  // first call always refreshes and we get a real expiry timestamp from
-  // Pinterest rather than guessing one.
+function envSeed() {
+  const refresh = process.env.PINTEREST_REFRESH_TOKEN || null;
   return {
     access_token: process.env.PINTEREST_ACCESS_TOKEN || null,
-    refresh_token: process.env.PINTEREST_REFRESH_TOKEN || null,
-    expires_at: 0,
+    refresh_token: refresh,
+    // With a refresh token, expires_at 0 forces a real refresh on first use.
+    // Without one (a token pasted from the developer portal), trust it for
+    // ~25 days; it will be rejected after ~30 and logged clearly.
+    expires_at: refresh ? 0 : Date.now() + 25 * 24 * 3600 * 1000,
+    seed_access: process.env.PINTEREST_ACCESS_TOKEN || null,
   };
+}
+
+function loadTokens() {
+  if (fs.existsSync(TOKEN_FILE)) {
+    const saved = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+    // If PINTEREST_ACCESS_TOKEN in Railway was changed since the saved file
+    // was written, the new env token wins (this is how a dead token gets
+    // replaced without having to delete the file by hand).
+    const envToken = process.env.PINTEREST_ACCESS_TOKEN;
+    if (envToken && saved.seed_access !== envToken) {
+      console.log('🔑 New PINTEREST_ACCESS_TOKEN detected, replacing saved Pinterest tokens');
+      return envSeed();
+    }
+    return saved;
+  }
+  return envSeed();
 }
 
 function saveTokens(tokens) {
   const dir = path.dirname(TOKEN_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
+  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ ...tokens, seed_access: process.env.PINTEREST_ACCESS_TOKEN || null }, null, 2));
 }
 
 async function refreshAccessToken(refreshToken) {
@@ -87,7 +103,9 @@ async function getValidAccessToken() {
   let tokens = loadTokens();
 
   const needsRefresh = !tokens.access_token || Date.now() >= (tokens.expires_at || 0);
-  if (needsRefresh) {
+  if (needsRefresh && tokens.access_token && !tokens.refresh_token) {
+    console.warn('⚠️  Pinterest access token is past its expected expiry and there is no refresh token; trying it anyway');
+  } else if (needsRefresh) {
     tokens = await refreshAccessToken(tokens.refresh_token);
   }
   return tokens.access_token;
@@ -114,7 +132,7 @@ async function createPin(listing, caption) {
     board_id: PINTEREST_BOARD_ID,
     title,
     description,
-    link: listing.listingUrl,
+    link: siteUrl('pinterest'),
     media_source: {
       source_type: 'image_url',
       url: listing.imageUrl
@@ -140,6 +158,9 @@ async function createPin(listing, caption) {
     if (err.response && err.response.status === 401) {
       console.log('⚠️  Pinterest token rejected, forcing a refresh and retrying once...');
       const tokens = loadTokens();
+      if (!tokens.refresh_token) {
+        throw new Error('Pinterest rejected the access token and no PINTEREST_REFRESH_TOKEN is set; generate a new token in the Pinterest developer portal');
+      }
       const refreshed = await refreshAccessToken(tokens.refresh_token);
       const res = await post(refreshed.access_token);
       console.log(`✅ Pin created on retry! Pin ID: ${res.data.id}`);

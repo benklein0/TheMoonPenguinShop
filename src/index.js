@@ -8,6 +8,7 @@ const { createReel, createVoiceoverReel, cleanup } = require('./video');
 const { uploadReel, checkTrendingAudio } = require('./instagram');
 const { getTrendingTags } = require('./hashtags');
 const { createPin } = require('./pinterest');
+const { runStockSync } = require('./stockSync');
 const fs = require('fs');
 
 const REQUIRED_ENV = ['IG_ACCESS_TOKEN', 'IG_USER_ID', 'ANTHROPIC_API_KEY', 'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
@@ -45,6 +46,10 @@ const POST_TIMES = [
   { cron: '0 13 * * *', label: '1:00 PM ET' },
   { cron: '0 17 * * *', label: '5:00 PM ET' },
 ];
+
+// Once a day, ahead of the first post, check which listings have actually
+// sold out on Etsy (see stockSync.js for why this exists at all).
+const STOCK_SYNC_CRON = '30 6 * * *';
 
 async function runPipeline() {
   console.log('\n🐧 MoonPenguinPoster — Starting pipeline run');
@@ -121,15 +126,23 @@ POST_TIMES.forEach(({ cron: cronTime, label }) => {
   console.log(`📅 Scheduled: ${label} (${cronTime})`);
 });
 
+cron.schedule(STOCK_SYNC_CRON, () => {
+  console.log('\n⏰ Scheduled trigger: stock sync (6:30 AM ET)');
+  runStockSync().catch(e => console.warn('Stock sync error:', e.message));
+}, { timezone: 'America/New_York' });
+console.log(`📅 Scheduled: stock sync (6:30 AM ET) (${STOCK_SYNC_CRON})`);
+
 console.log('\n🐧 MoonPenguinPoster is running.');
 console.log('   Posting daily: 9am, 1pm, 5pm ET\n');
 
-// Startup diagnostics (no posting): confirms the trending-audio API works and
-// warms the trending-hashtag cache, so problems show up in the deploy logs
-// right away instead of at the next scheduled post.
+// Startup diagnostics (no posting): confirms the trending-audio API works,
+// warms the trending-hashtag cache, and runs the stock sync once immediately
+// (rather than waiting for 6:30am) so problems -- and a stale stock feed --
+// show up in the deploy logs right away instead of at the next scheduled run.
 (async () => {
   try { await checkTrendingAudio(); } catch (e) { console.warn('Audio check error:', e.message); }
   try { await getTrendingTags(); } catch (e) { console.warn('⚠️  Trending hashtag refresh failed:', e.message); }
+  try { await runStockSync(); } catch (e) { console.warn('⚠️  Stock sync failed at startup:', e.message); }
 })();
 
 if (process.env.RUN_NOW === 'true') {

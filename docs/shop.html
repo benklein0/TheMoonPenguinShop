@@ -321,10 +321,38 @@ let activeCharm = '';
 let activePriceRange = '';
 let searchQuery = '';
 
+// products.json itself is a static snapshot that's never updated after the
+// site is built, so it can't be trusted for stock status on its own. A
+// separate job scrapes Etsy daily and pushes which slugs have actually sold
+// out to this branch (kept off `main` on purpose -- see src/stockSync.js).
+// This overlay is deliberately fail-safe: if the feed is unreachable, stale,
+// or malformed, we just keep products.json's own inStock values rather than
+// risk breaking the shop page.
+const STOCK_FEED_URL = 'https://raw.githubusercontent.com/benklein0/TheMoonPenguinShop/stock/stock.json';
+const STOCK_FEED_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 4; // 4 days
+
+async function applyStockFeed() {
+  try {
+    const res = await fetch(`${STOCK_FEED_URL}?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const feed = await res.json();
+    if (!feed || typeof feed.updated !== 'string' || !Array.isArray(feed.outOfStock)) return;
+    const age = Date.now() - Date.parse(feed.updated);
+    if (!(age >= 0) || age > STOCK_FEED_MAX_AGE_MS) return; // missing/invalid date, or too stale to trust
+    const outOfStockSlugs = new Set(feed.outOfStock);
+    products.forEach(p => {
+      if (outOfStockSlugs.has(p.slug)) p.inStock = false;
+    });
+  } catch (e) {
+    console.warn('Stock feed unavailable, showing products.json defaults:', e);
+  }
+}
+
 // Load products
 async function loadProducts() {
   const res = await fetch('/products.json');
   products = await res.json();
+  await applyStockFeed();
   populateFacetOptions();
   applyFiltersFromURL();
   renderGrid();

@@ -57,12 +57,16 @@ async function getTrendingAudio() {
   const remembered = readState('audio_source', null);
   const order = [...AUDIO_SOURCES].sort((a, b) => (b.name === remembered) - (a.name === remembered));
   const queries = [undefined, ...SEARCHES.sort(() => Math.random() - 0.5).slice(0, 3)];
+  const failures = []; // one line per request shape, logged if nothing works
   for (const src of order) {
-    if (!src.token()) continue;
+    if (!src.token()) { failures.push(`${src.name}: no token set`); continue; }
     for (const q of queries) {
       try {
-        const { tracks } = await fetchAudio(src, { search_query: q });
-        if (!tracks.length) continue;
+        const { raw, tracks } = await fetchAudio(src, { search_query: q });
+        if (!tracks.length) {
+          if (!q) failures.push(`${src.name}: 0 tracks, response ${JSON.stringify(raw).slice(0, 160)}`);
+          continue;
+        }
         if (remembered !== src.name) writeState('audio_source', src.name);
         const recent = readState('recent_audio', []);
         const pool = tracks.slice(0, Math.min(15, tracks.length));
@@ -75,10 +79,15 @@ async function getTrendingAudio() {
         return { id, title, api: src.host === FB_BASE_URL ? 'facebook' : 'instagram' };
       } catch (err) {
         // A path error on one shape just means try the next shape.
-        if (!q) { if (process.env.DIAGNOSE_AUDIO === 'true') console.warn(`   audio ${src.name}: ${errMsg(err)}`); break; }
+        if (!q) {
+          const e = err.response?.data?.error;
+          failures.push(`${src.name}: HTTP ${err.response?.status || '?'} ${e ? `code ${e.code}/${e.error_subcode || '-'} ${e.message}` : err.message}`);
+          break;
+        }
       }
     }
   }
+  failures.forEach(f => console.warn(`   audio ${f}`));
   console.warn('⚠️  No audio tracks from any Audio API request shape (see 🩺 diagnosis in startup logs)');
   return null;
 }
@@ -280,7 +289,7 @@ async function uploadReel(videoPath, caption, { audioMode = 'none' } = {}) {
     if (track) {
       audio = audioMode === 'under'
         ? { id: track.id, api: track.api, audioVolume: 12, videoVolume: 100 }
-        : { id: track.id, api: track.api, audioVolume: 100, videoVolume: 0 };
+        : { id: track.id, api: track.api, audioVolume: 100, videoVolume: 1 }  // Meta requires video_volume 1-100 (0 is rejected);
     }
   }
 

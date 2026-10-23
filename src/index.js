@@ -47,9 +47,9 @@ const POST_TIMES = [
   { cron: '0 17 * * *', label: '5:00 PM ET' },
 ];
 
-// Once a day, ahead of the first post, check which listings have actually
-// sold out on Etsy (see stockSync.js for why this exists at all).
-const STOCK_SYNC_CRON = '30 6 * * *';
+// Every hour (at :30, clear of the on-the-hour posts), check which listings
+// have actually sold out on Etsy (see stockSync.js for why this exists at all).
+const STOCK_SYNC_CRON = '30 * * * *';
 
 async function runPipeline() {
   console.log('\n🐧 MoonPenguinPoster — Starting pipeline run');
@@ -127,17 +127,17 @@ POST_TIMES.forEach(({ cron: cronTime, label }) => {
 });
 
 cron.schedule(STOCK_SYNC_CRON, () => {
-  console.log('\n⏰ Scheduled trigger: stock sync (6:30 AM ET)');
+  console.log('\n⏰ Scheduled trigger: stock sync (hourly)');
   runStockSync().catch(e => console.warn('Stock sync error:', e.message));
 }, { timezone: 'America/New_York' });
-console.log(`📅 Scheduled: stock sync (6:30 AM ET) (${STOCK_SYNC_CRON})`);
+console.log(`📅 Scheduled: stock sync (hourly at :30) (${STOCK_SYNC_CRON})`);
 
 console.log('\n🐧 MoonPenguinPoster is running.');
 console.log('   Posting daily: 9am, 1pm, 5pm ET\n');
 
 // Startup diagnostics (no posting): confirms the trending-audio API works,
 // warms the trending-hashtag cache, and runs the stock sync once immediately
-// (rather than waiting for 6:30am) so problems -- and a stale stock feed --
+// (rather than waiting for the next :30) so problems -- and a stale stock feed --
 // show up in the deploy logs right away instead of at the next scheduled run.
 (async () => {
   try { await checkTrendingAudio(); } catch (e) { console.warn('Audio check error:', e.message); }

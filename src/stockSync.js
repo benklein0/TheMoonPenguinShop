@@ -8,9 +8,11 @@
 // for "Red Resin Fox Pill Box: Stainless Steel Travel Medicine Organizer"
 // on 2026-10-22 weeks after it was actually gone from Etsy.)
 //
-// Live listings come from the Etsy Open API (findAllActiveListingsByShop,
-// then a batch lookup for each listing's photos). Only the public key is
-// needed -- no OAuth -- via ETSY_API_KEY + ETSY_SHARED_SECRET in Railway.
+// Live listings come from the Etsy Open API (getListingsByShop with
+// state=active, signed in as the shop owner -- see src/etsyAuth.js and
+// scripts/etsy-auth.js). Needs ETSY_API_KEY (keystring), ETSY_SHARED_SECRET
+// and ETSY_REFRESH_TOKEN in Railway. Signing in matters: key-only requests
+// can't page past the first 100 listings, and the shop has more than that.
 // A listing that's sold out or deactivated isn't "active", so "this product
 // isn't among the active listings" means it's no longer purchasable.
 //
@@ -25,7 +27,7 @@
 // zero risk to the live product data or a GitHub Pages rebuild, and
 // docs/shop.html fetches it client-side and overlays it onto inStock.
 //
-// If the API is unavailable (keys missing, Etsy down), we fall back to
+// If the API is unavailable (not signed in, Etsy down), we fall back to
 // EtsyListingsDownload.csv at the repo root: Etsy's own "Download data"
 // export of active listings (Shop Manager > Settings > Options > Download
 // Data). Scraping the shop page is not an option -- Etsy's bot protection
@@ -38,16 +40,12 @@
 // photos are shared between color variants of the same design, so matching
 // on them would keep sold-out variants "in stock".
 const axios = require('axios');
+const { getEtsyAccessToken, hasEtsySignIn } = require('./etsyAuth');
 const fs = require('fs');
 const path = require('path');
 
 const ETSY_API = 'https://openapi.etsy.com/v3/application';
 const SHOP_NAME = 'TheMoonPenguinShop';
-const SWEEPS = [
-  ['created', 'desc'], ['created', 'asc'],
-  ['price', 'asc'], ['price', 'desc'],
-  ['updated', 'desc'], ['updated', 'asc'],
-];
 const PRODUCTS_PATH = path.join(process.cwd(), 'docs', 'products.json');
 const LISTINGS_CSV_PATH = path.join(process.cwd(), 'EtsyListingsDownload.csv');
 
@@ -67,11 +65,14 @@ function mainImageId(images) {
   return m ? m[1] : null;
 }
 
-function etsyGet(pathname, params) {
+async function etsyGet(pathname, params) {
   return axios.get(`${ETSY_API}${pathname}`, {
     params,
-    headers: { 'x-api-key': `${process.env.ETSY_API_KEY}:${process.env.ETSY_SHARED_SECRET}` },
-    // Etsy wants repeated array params as a comma list (listing_ids=1,2,3).
+    headers: {
+      'x-api-key': `${process.env.ETSY_API_KEY}:${process.env.ETSY_SHARED_SECRET}`,
+      Authorization: `Bearer ${await getEtsyAccessToken()}`,
+    },
+    // Etsy wants array params as a comma list (includes=Images,Shop).
     paramsSerializer: p => new URLSearchParams(
       Object.entries(p).map(([k, v]) => [k, Array.isArray(v) ? v.join(',') : String(v)])
     ).toString(),
@@ -92,48 +93,26 @@ async function getShopId() {
 // Every active listing's title + main photo ID, straight from Etsy.
 async function fetchActiveListings() {
   const shopId = await getShopId();
-  // Key-only ("anonymous") requests can't page past a small, undocumented
-  // offset ("Offset exceeds the maximum allowed for anonymous requests"),
-  // and the shop has more listings than that. So walk the list in several
-  // sort orders -- newest-first and oldest-first meet in the middle -- and
-  // union them until we've seen as many listings as Etsy says exist.
-  const byId = new Map();
-  let total = null;
-  let maxOffsetReached = 0;
-  for (const [sort_on, sort_order] of SWEEPS) {
-    for (let offset = 0; ; offset += 100) {
-      let res;
-      try {
-        res = await etsyGet(`/shops/${shopId}/listings/active`, { limit: 100, offset, sort_on, sort_order });
-      } catch (e) {
-        if (/offset exceeds/i.test(e.response?.data?.error || '')) break;
-        throw e;
-      }
-      maxOffsetReached = Math.max(maxOffsetReached, offset);
-      total = res.data.count;
-      const page = res.data.results || [];
-      page.forEach(l => byId.set(l.listing_id, l));
-      if (page.length < 100 || offset + 100 >= total) break;
-    }
-    if (total !== null && byId.size >= total) break;
-  }
-  if (total === null || byId.size < total) {
-    throw new Error(`only reached ${byId.size} of ${total} active listings (max offset ${maxOffsetReached})`);
-  }
-  const listings = [...byId.values()];
-
   const titles = new Set();
   const mainImages = new Set();
-  for (let i = 0; i < listings.length; i += 100) {
-    const ids = listings.slice(i, i + 100).map(l => l.listing_id);
-    const res = await etsyGet('/listings/batch', { listing_ids: ids, includes: ['Images'] });
-    for (const l of res.data.results || []) {
+  let seen = 0;
+  let total = null;
+  for (let offset = 0; ; offset += 100) {
+    const res = await etsyGet(`/shops/${shopId}/listings`, {
+      state: 'active', limit: 100, offset, sort_on: 'created', sort_order: 'asc', includes: ['Images'],
+    });
+    total = res.data.count;
+    const page = res.data.results || [];
+    seen += page.length;
+    for (const l of page) {
       if (l.state !== 'active' || l.quantity <= 0) continue;
       titles.add(normalizeTitle(l.title));
       const main = (l.images || []).slice().sort((a, b) => a.rank - b.rank)[0];
       if (main) mainImages.add(String(main.listing_image_id));
     }
+    if (page.length < 100 || seen >= total) break;
   }
+  if (seen < total) throw new Error(`only received ${seen} of ${total} active listings`);
   return { titles, mainImages };
 }
 
@@ -255,7 +234,7 @@ async function runStockSync() {
 
   let active;
   let source;
-  if (process.env.ETSY_API_KEY && process.env.ETSY_SHARED_SECRET) {
+  if (process.env.ETSY_API_KEY && process.env.ETSY_SHARED_SECRET && hasEtsySignIn()) {
     try {
       active = await fetchActiveListings();
       source = 'Etsy API';
@@ -264,7 +243,7 @@ async function runStockSync() {
       console.warn(`⚠️  Stock sync: Etsy API failed (${detail}), using EtsyListingsDownload.csv`);
     }
   } else {
-    console.warn('⚠️  Stock sync: ETSY_API_KEY / ETSY_SHARED_SECRET not set, using EtsyListingsDownload.csv');
+    console.warn('⚠️  Stock sync: Etsy not connected (needs ETSY_API_KEY, ETSY_SHARED_SECRET and ETSY_REFRESH_TOKEN -- see scripts/etsy-auth.js), using EtsyListingsDownload.csv');
   }
   if (!active) {
     try {

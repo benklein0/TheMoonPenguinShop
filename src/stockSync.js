@@ -22,6 +22,19 @@
 // read/write on this repo) -- same reasoning as Muse's hashtags branch:
 // zero risk to the live product data or a GitHub Pages rebuild, and
 // docs/shop.html fetches it client-side and overlays it onto inStock.
+//
+// Etsy's bot protection 403s the scrape (from Railway and from a home
+// connection alike, Oct 2026), so when it fails we fall back to
+// EtsyListingsDownload.csv at the repo root: Etsy's own "Download data"
+// export of active listings (Shop Manager > Settings > Options > Download
+// Data). Re-export it and push whenever listings sell out or are added.
+//
+// Matching: a product counts as live if its title matches a live listing,
+// or (CSV only) its main photo is that listing's main photo. Many listings
+// have been retitled since products.json was built, and Etsy keeps the
+// photo IDs across a retitle. Only the MAIN photo is used -- secondary
+// photos are shared between color variants of the same design, so matching
+// on them would keep sold-out variants "in stock".
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +42,7 @@ const path = require('path');
 const SHOP_URL = 'https://www.etsy.com/shop/TheMoonPenguinShop';
 const MAX_PAGES = 12; // safety cap -- the shop currently runs ~7 pages of active listings
 const PRODUCTS_PATH = path.join(process.cwd(), 'docs', 'products.json');
+const LISTINGS_CSV_PATH = path.join(process.cwd(), 'EtsyListingsDownload.csv');
 
 const GITHUB_REPO = 'benklein0/TheMoonPenguinShop';
 const STOCK_BRANCH = 'stock';
@@ -42,6 +56,13 @@ const USER_AGENTS = [
 
 function normalizeTitle(t) {
   return (t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Etsy image URLs look like .../r/il/9e7caf/8040890546/il_fullxfull...;
+// the numeric part is the photo's ID and survives a listing retitle.
+function mainImageId(images) {
+  const m = /\/il\/\w+\/(\d+)\//.exec(String(images || ''));
+  return m ? m[1] : null;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -96,6 +117,45 @@ async function scrapeActiveListingTitles() {
     await sleep(1500 + Math.random() * 1500); // be polite between pages
   }
   return active;
+}
+
+// Minimal RFC 4180 parser: quoted fields may contain commas, newlines and
+// doubled quotes (Etsy's DESCRIPTION column has all three).
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(v => v !== ''));
+}
+
+// Reads Etsy's listings export and returns the live titles + main photos.
+function readListingsCsv() {
+  const [header, ...rows] = parseCsv(fs.readFileSync(LISTINGS_CSV_PATH, 'utf8').replace(/^\uFEFF/, ''));
+  const col = name => header.indexOf(name);
+  const [iTitle, iQty, iImage] = [col('TITLE'), col('QUANTITY'), col('IMAGE1')];
+  if (iTitle < 0 || iImage < 0) throw new Error('missing TITLE/IMAGE1 columns');
+  const titles = new Set();
+  const mainImages = new Set();
+  for (const r of rows) {
+    if (iQty >= 0 && Number(r[iQty]) <= 0) continue; // exported but none left
+    titles.add(normalizeTitle(r[iTitle]));
+    const img = mainImageId(r[iImage]);
+    if (img) mainImages.add(img);
+  }
+  return { titles, mainImages };
 }
 
 async function githubRequest(method, url, token, data, params) {
@@ -166,27 +226,36 @@ async function runStockSync() {
   }
 
   let active;
+  let source;
   try {
-    active = await scrapeActiveListingTitles();
+    active = { titles: await scrapeActiveListingTitles(), mainImages: new Set() };
+    source = 'Etsy shop page';
   } catch (e) {
-    console.warn('⚠️  Stock sync: could not reach Etsy, skipping this run:', e.message);
-    return;
+    console.warn(`⚠️  Stock sync: could not reach Etsy (${e.message}), using EtsyListingsDownload.csv`);
+    try {
+      active = readListingsCsv();
+      source = 'EtsyListingsDownload.csv';
+    } catch (csvErr) {
+      console.warn('⚠️  Stock sync: could not read EtsyListingsDownload.csv, skipping this run:', csvErr.message);
+      return;
+    }
   }
 
-  // Sanity check: if the scrape came back suspiciously thin (Etsy changed
-  // its markup, got rate-limited after one page, etc.), refuse to publish a
-  // feed that would wrongly mark a huge chunk of the catalog "sold out".
+  // Sanity check: if the source came back suspiciously thin (Etsy changed
+  // its markup, got rate-limited after one page, a truncated export, etc.),
+  // refuse to publish a feed that would wrongly mark a huge chunk of the
+  // catalog "sold out".
   const minExpected = Math.floor(products.length * 0.5);
-  if (active.size < minExpected) {
-    console.warn(`⚠️  Stock sync: only found ${active.size} active listings (expected at least ${minExpected}) -- looks wrong, skipping this run`);
+  if (active.titles.size < minExpected) {
+    console.warn(`⚠️  Stock sync: only found ${active.titles.size} active listings in ${source} (expected at least ${minExpected}) -- looks wrong, skipping this run`);
     return;
   }
 
   const outOfStock = products
-    .filter(p => !active.has(normalizeTitle(p.title)))
+    .filter(p => !active.titles.has(normalizeTitle(p.title)) && !active.mainImages.has(mainImageId(p.images)))
     .map(p => p.slug);
 
-  console.log(`📦 Stock sync: ${outOfStock.length} of ${products.length} products look sold out`);
+  console.log(`📦 Stock sync (${source}): ${outOfStock.length} of ${products.length} products look sold out`);
 
   const payload = { updated: new Date().toISOString(), outOfStock };
 
@@ -198,4 +267,4 @@ async function runStockSync() {
   }
 }
 
-module.exports = { runStockSync, normalizeTitle };
+module.exports = { runStockSync, normalizeTitle, readListingsCsv, mainImageId };

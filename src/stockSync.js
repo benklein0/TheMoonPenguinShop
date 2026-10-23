@@ -43,6 +43,11 @@ const path = require('path');
 
 const ETSY_API = 'https://openapi.etsy.com/v3/application';
 const SHOP_NAME = 'TheMoonPenguinShop';
+const SWEEPS = [
+  ['created', 'desc'], ['created', 'asc'],
+  ['price', 'asc'], ['price', 'desc'],
+  ['updated', 'desc'], ['updated', 'asc'],
+];
 const PRODUCTS_PATH = path.join(process.cwd(), 'docs', 'products.json');
 const LISTINGS_CSV_PATH = path.join(process.cwd(), 'EtsyListingsDownload.csv');
 
@@ -87,13 +92,35 @@ async function getShopId() {
 // Every active listing's title + main photo ID, straight from Etsy.
 async function fetchActiveListings() {
   const shopId = await getShopId();
-  const listings = [];
-  for (let offset = 0; ; offset += 100) {
-    const res = await etsyGet(`/shops/${shopId}/listings/active`, { limit: 100, offset });
-    const page = res.data.results || [];
-    listings.push(...page);
-    if (page.length < 100 || listings.length >= res.data.count) break;
+  // Key-only ("anonymous") requests can't page past a small, undocumented
+  // offset ("Offset exceeds the maximum allowed for anonymous requests"),
+  // and the shop has more listings than that. So walk the list in several
+  // sort orders -- newest-first and oldest-first meet in the middle -- and
+  // union them until we've seen as many listings as Etsy says exist.
+  const byId = new Map();
+  let total = null;
+  let maxOffsetReached = 0;
+  for (const [sort_on, sort_order] of SWEEPS) {
+    for (let offset = 0; ; offset += 100) {
+      let res;
+      try {
+        res = await etsyGet(`/shops/${shopId}/listings/active`, { limit: 100, offset, sort_on, sort_order });
+      } catch (e) {
+        if (/offset exceeds/i.test(e.response?.data?.error || '')) break;
+        throw e;
+      }
+      maxOffsetReached = Math.max(maxOffsetReached, offset);
+      total = res.data.count;
+      const page = res.data.results || [];
+      page.forEach(l => byId.set(l.listing_id, l));
+      if (page.length < 100 || offset + 100 >= total) break;
+    }
+    if (total !== null && byId.size >= total) break;
   }
+  if (total === null || byId.size < total) {
+    throw new Error(`only reached ${byId.size} of ${total} active listings (max offset ${maxOffsetReached})`);
+  }
+  const listings = [...byId.values()];
 
   const titles = new Set();
   const mainImages = new Set();
